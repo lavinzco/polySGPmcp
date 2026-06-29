@@ -21,7 +21,7 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["agent*", "common*", "polymarket*", "weather_mcp*"]
+include = ["agent*", "common*", "polymarket*", "weather_mcp*", "scheduler*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
