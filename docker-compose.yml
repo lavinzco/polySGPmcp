@@ -1,0 +1,23 @@
+services:
+  hermes:
+    build: .
+    container_name: hermes-scheduler
+    command: >
+      python -m scheduler.cron
+      --mode singapore
+      --interval-minutes 30
+    env_file:
+      - .env
+    environment:
+      - DATA_DIR=/app/data
+      - LOG_LEVEL=INFO
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import pathlib, sys, time; f=pathlib.Path('/app/data/last_run.txt'); sys.exit(0 if f.exists() and time.time()-f.stat().st_mtime < 7200 else 1)"]
+      interval: 10m
+      timeout: 5s
+      retries: 3
+      start_period: 5m
