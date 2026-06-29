@@ -95,6 +95,7 @@ async def run_collection_once(
     memory: DecisionLog | None = None,
     dry_run: bool = True,
     city_filter: set[str] | None = None,
+    dedup_window_minutes: int | None = None,
 ) -> RunStats:
     memory = memory or DecisionLog(db_path=_data_path("hermes_decisions.db"))
     router = LLMRouter()
@@ -145,7 +146,8 @@ async def run_collection_once(
         logger.info(f"Evaluating {len(city_markets)} markets for {city}")
         _, stats = await agent.run_once(
             weather, city_markets,
-            skip_if_evaluated_today=True,
+            dedup_window_minutes=dedup_window_minutes,
+            skip_if_evaluated_today=(dedup_window_minutes is None),
             dry_run=dry_run,
         )
 
@@ -182,11 +184,17 @@ CITY_MODES: dict[str, set[str]] = {
     "all": set(),
 }
 
+DEDUP_WINDOW_BY_MODE: dict[str, int | None] = {
+    "singapore": 25,
+    "all": None,
+}
+
 
 async def run_daily_collection(
     interval_minutes: float,
     *,
     city_filter: set[str] | None = None,
+    dedup_window_minutes: int | None = None,
 ) -> None:
     interval_seconds = interval_minutes * 60
     shutdown = asyncio.Event()
@@ -216,6 +224,7 @@ async def run_daily_collection(
             try:
                 stats = await run_collection_once(
                     memory=memory, dry_run=True, city_filter=city_filter,
+                    dedup_window_minutes=dedup_window_minutes,
                 )
                 _print_stats(stats, cycle)
             except Exception:
@@ -298,10 +307,15 @@ def main():
         interval_minutes = 480.0
 
     city_filter = CITY_MODES.get(args.mode) or None
+    dedup_window = DEDUP_WINDOW_BY_MODE.get(args.mode)
 
     logging.basicConfig(
         level=os.environ.get("LOG_LEVEL", "INFO"),
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+
+    logger.info(
+        f"Mode={args.mode}, dedup={'window ' + str(dedup_window) + 'm' if dedup_window else 'daily'}"
     )
 
     if sys.platform == "win32":
@@ -315,11 +329,17 @@ def main():
             f"Discrepancies: {len(result.discrepancies)}"
         )
     elif args.once:
-        stats = asyncio.run(run_collection_once(dry_run=True, city_filter=city_filter))
+        stats = asyncio.run(run_collection_once(
+            dry_run=True, city_filter=city_filter,
+            dedup_window_minutes=dedup_window,
+        ))
         _print_stats(stats, 1)
         _write_healthcheck(True)
     else:
-        asyncio.run(run_daily_collection(interval_minutes, city_filter=city_filter))
+        asyncio.run(run_daily_collection(
+            interval_minutes, city_filter=city_filter,
+            dedup_window_minutes=dedup_window,
+        ))
 
 
 if __name__ == "__main__":

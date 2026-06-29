@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from agent.aggregation import AggregatedSignal
@@ -103,6 +103,16 @@ class DecisionLog:
         row = conn.execute(
             "SELECT 1 FROM decisions WHERE market_id = ? AND eval_date = ? LIMIT 1",
             (market_id, eval_date),
+        ).fetchone()
+        return row is not None
+
+    def was_evaluated_in_window(self, market_id: str, window_minutes: int) -> bool:
+        """Return True if market was evaluated within the last `window_minutes`."""
+        conn = self._get_conn()
+        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=window_minutes)).isoformat()
+        row = conn.execute(
+            "SELECT 1 FROM decisions WHERE market_id = ? AND timestamp >= ? LIMIT 1",
+            (market_id, cutoff),
         ).fetchone()
         return row is not None
 

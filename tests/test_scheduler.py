@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -204,3 +204,150 @@ class TestRunOnceDedup:
         assert stats.markets_evaluated == 1
         assert stats.markets_skipped_dedup == 0
         memory.close()
+
+
+class TestWindowDedupInRunOnce:
+    """Test dedup_window_minutes parameter in HermesAgent.run_once()."""
+
+    @pytest.mark.asyncio
+    async def test_window_dedup_skips_recent(self, tmp_path):
+        """Market evaluated 5 min ago should be skipped with 25-min window."""
+        mock_provider = AsyncMock()
+        mock_provider.complete = AsyncMock(return_value=_HOLD_JSON)
+
+        router = LLMRouter()
+        router._providers[TaskType.STRATEGY] = mock_provider
+
+        memory = DecisionLog(tmp_path / "window.db")
+        agent = HermesAgent(router=router, memory=memory)
+
+        # First run with window dedup — evaluates
+        _, stats1 = await agent.run_once(
+            _make_weather(), [_make_market("mkt-A")],
+            dedup_window_minutes=25,
+        )
+        assert stats1.markets_evaluated == 1
+
+        # Second run immediately — should skip (within 25m window)
+        mock_provider.complete.reset_mock()
+        _, stats2 = await agent.run_once(
+            _make_weather(), [_make_market("mkt-A")],
+            dedup_window_minutes=25,
+        )
+        assert stats2.markets_skipped_dedup == 1
+        assert stats2.markets_evaluated == 0
+        mock_provider.complete.assert_not_called()
+        memory.close()
+
+    @pytest.mark.asyncio
+    async def test_window_dedup_allows_after_expiry(self, tmp_path):
+        """Market evaluated 60 min ago should pass with 25-min window."""
+        mock_provider = AsyncMock()
+        mock_provider.complete = AsyncMock(return_value=_HOLD_JSON)
+
+        router = LLMRouter()
+        router._providers[TaskType.STRATEGY] = mock_provider
+
+        memory = DecisionLog(tmp_path / "window_expiry.db")
+        agent = HermesAgent(router=router, memory=memory)
+
+        # First evaluation
+        _, _ = await agent.run_once(
+            _make_weather(), [_make_market("mkt-A")],
+            dedup_window_minutes=25,
+        )
+
+        # Backdate the record to 60 minutes ago
+        conn = memory._get_conn()
+        old_ts = (datetime.now(timezone.utc) - timedelta(minutes=60)).isoformat()
+        conn.execute("UPDATE decisions SET timestamp = ?", (old_ts,))
+        conn.commit()
+
+        mock_provider.complete.reset_mock()
+        _, stats = await agent.run_once(
+            _make_weather(), [_make_market("mkt-A")],
+            dedup_window_minutes=25,
+        )
+        assert stats.markets_evaluated == 1
+        assert stats.markets_skipped_dedup == 0
+        memory.close()
+
+    @pytest.mark.asyncio
+    async def test_window_dedup_overrides_daily(self, tmp_path):
+        """When both params given, window dedup takes priority over daily."""
+        mock_provider = AsyncMock()
+        mock_provider.complete = AsyncMock(return_value=_HOLD_JSON)
+
+        router = LLMRouter()
+        router._providers[TaskType.STRATEGY] = mock_provider
+
+        memory = DecisionLog(tmp_path / "priority.db")
+        agent = HermesAgent(router=router, memory=memory)
+
+        # Evaluate once
+        _, _ = await agent.run_once(
+            _make_weather(), [_make_market("mkt-A")],
+            dedup_window_minutes=25,
+            skip_if_evaluated_today=True,
+        )
+
+        # Backdate past the window but still today
+        conn = memory._get_conn()
+        old_ts = (datetime.now(timezone.utc) - timedelta(minutes=60)).isoformat()
+        conn.execute("UPDATE decisions SET timestamp = ?", (old_ts,))
+        conn.commit()
+
+        mock_provider.complete.reset_mock()
+        # With window=25, record is 60m old → should re-evaluate
+        # If daily took priority, it would skip (same day)
+        _, stats = await agent.run_once(
+            _make_weather(), [_make_market("mkt-A")],
+            dedup_window_minutes=25,
+            skip_if_evaluated_today=True,
+        )
+        assert stats.markets_evaluated == 1
+        assert stats.markets_skipped_dedup == 0
+        memory.close()
+
+    @pytest.mark.asyncio
+    async def test_no_dedup_when_both_disabled(self, tmp_path):
+        """No dedup when window=None and skip_today=False."""
+        mock_provider = AsyncMock()
+        mock_provider.complete = AsyncMock(return_value=_HOLD_JSON)
+
+        router = LLMRouter()
+        router._providers[TaskType.STRATEGY] = mock_provider
+
+        memory = DecisionLog(tmp_path / "nodedup.db")
+        agent = HermesAgent(router=router, memory=memory)
+
+        _, _ = await agent.run_once(
+            _make_weather(), [_make_market("mkt-A")],
+        )
+        mock_provider.complete.reset_mock()
+        _, stats = await agent.run_once(
+            _make_weather(), [_make_market("mkt-A")],
+        )
+        assert stats.markets_evaluated == 1
+        assert stats.markets_skipped_dedup == 0
+        memory.close()
+
+
+class TestModeSpecificDedup:
+    """Test DEDUP_WINDOW_BY_MODE and CITY_MODES routing in cron.py."""
+
+    def test_singapore_mode_uses_window_dedup(self):
+        from scheduler.cron import DEDUP_WINDOW_BY_MODE
+        assert DEDUP_WINDOW_BY_MODE["singapore"] == 25
+
+    def test_all_mode_uses_daily_dedup(self):
+        from scheduler.cron import DEDUP_WINDOW_BY_MODE
+        assert DEDUP_WINDOW_BY_MODE["all"] is None
+
+    def test_singapore_city_filter(self):
+        from scheduler.cron import CITY_MODES
+        assert CITY_MODES["singapore"] == {"Singapore"}
+
+    def test_all_city_filter_empty(self):
+        from scheduler.cron import CITY_MODES
+        assert CITY_MODES["all"] == set()

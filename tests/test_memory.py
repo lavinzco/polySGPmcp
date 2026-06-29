@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
-from datetime import datetime, timezone
 
 import pytest
 
@@ -155,3 +155,69 @@ class TestDecisionLog:
 
         assert decision_log.was_evaluated_today("mkt-001")
         assert not decision_log.was_evaluated_today("mkt-001", date_str="2025-01-01")
+
+
+class TestWindowDedup:
+    def test_within_window(self, decision_log):
+        """Record just created should be within any reasonable window."""
+        decision_log.log_decision(
+            weather_snapshot={},
+            market_snapshot={},
+            llm_raw_outputs=[],
+            final_signal=_make_signal(),
+            risk_decision="approved",
+        )
+        assert decision_log.was_evaluated_in_window("mkt-001", 25)
+
+    def test_outside_window(self, decision_log):
+        """Record with old timestamp should be outside a short window."""
+        decision_log.log_decision(
+            weather_snapshot={},
+            market_snapshot={},
+            llm_raw_outputs=[],
+            final_signal=_make_signal(),
+            risk_decision="approved",
+        )
+        conn = decision_log._get_conn()
+        old_ts = (datetime.now(timezone.utc) - timedelta(minutes=60)).isoformat()
+        conn.execute(
+            "UPDATE decisions SET timestamp = ? WHERE market_id = 'mkt-001'",
+            (old_ts,),
+        )
+        conn.commit()
+
+        assert not decision_log.was_evaluated_in_window("mkt-001", 25)
+        assert decision_log.was_evaluated_in_window("mkt-001", 120)
+
+    def test_different_market_not_matched(self, decision_log):
+        decision_log.log_decision(
+            weather_snapshot={},
+            market_snapshot={},
+            llm_raw_outputs=[],
+            final_signal=_make_signal(),
+            risk_decision="approved",
+        )
+        assert not decision_log.was_evaluated_in_window("mkt-999", 25)
+
+    def test_empty_db(self, decision_log):
+        assert not decision_log.was_evaluated_in_window("mkt-001", 25)
+
+    def test_boundary_window(self, decision_log):
+        """Record 20m old: inside 25m window, outside 15m window."""
+        decision_log.log_decision(
+            weather_snapshot={},
+            market_snapshot={},
+            llm_raw_outputs=[],
+            final_signal=_make_signal(),
+            risk_decision="approved",
+        )
+        conn = decision_log._get_conn()
+        ts_20m_ago = (datetime.now(timezone.utc) - timedelta(minutes=20)).isoformat()
+        conn.execute(
+            "UPDATE decisions SET timestamp = ? WHERE market_id = 'mkt-001'",
+            (ts_20m_ago,),
+        )
+        conn.commit()
+
+        assert decision_log.was_evaluated_in_window("mkt-001", 25)
+        assert not decision_log.was_evaluated_in_window("mkt-001", 15)

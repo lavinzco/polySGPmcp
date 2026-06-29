@@ -45,14 +45,32 @@ class HermesAgent:
         markets: list[GammaMarket],
         *,
         skip_if_evaluated_today: bool = False,
+        dedup_window_minutes: int | None = None,
         dry_run: bool = True,
         sounding_note: DailySoundingNote | None = None,
     ) -> tuple[list[AggregatedSignal], RunStats]:
+        """Evaluate markets with optional dedup.
+
+        Dedup modes (mutually exclusive, dedup_window_minutes takes priority):
+        - dedup_window_minutes=N: skip if evaluated within last N minutes
+          (for high-frequency polling like Singapore 30-min cycles)
+        - skip_if_evaluated_today=True: skip if evaluated any time today
+          (for low-frequency polling like all-city 8h cycles)
+        """
         results: list[AggregatedSignal] = []
         stats = RunStats(markets_scanned=len(markets))
 
         for market in markets:
-            if skip_if_evaluated_today and self.memory.was_evaluated_today(market.id):
+            if dedup_window_minutes is not None:
+                if self.memory.was_evaluated_in_window(market.id, dedup_window_minutes):
+                    stats.markets_skipped_dedup += 1
+                    stats.skipped_ids.append(market.id)
+                    logger.info(
+                        f"Dedup: skip market {market.id} "
+                        f"(evaluated within {dedup_window_minutes}m window)"
+                    )
+                    continue
+            elif skip_if_evaluated_today and self.memory.was_evaluated_today(market.id):
                 stats.markets_skipped_dedup += 1
                 stats.skipped_ids.append(market.id)
                 logger.info(f"Dedup: skip market {market.id} (already evaluated today)")
