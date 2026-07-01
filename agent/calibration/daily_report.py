@@ -5,78 +5,80 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from agent.calibration.analyze import CalibrationReport, analyze_calibration
-from agent.calibration.db import CalibrationDB
+from agent.calibration.analyze import CalibrationReport, analyze_decisions
+from agent.memory import DecisionLog
 
 
 def format_report(report: CalibrationReport, date_str: str) -> str:
     lines: list[str] = []
     lines.append(f"{'=' * 72}")
-    lines.append(f"  HERMES CALIBRATION REPORT — {date_str}")
+    lines.append(f"  HERMES DECISION REPORT — {date_str}")
     lines.append(f"{'=' * 72}")
     lines.append("")
-    lines.append(f"Markets tracked: {report.total_markets}  "
-                 f"(settled: {report.settled_markets}, "
-                 f"pending: {report.unsettled_markets})")
+    lines.append(
+        f"Decisions: {report.total_decisions}  "
+        f"Markets: {report.total_markets}  "
+        f"(settled: {report.settled_markets}, "
+        f"pending: {report.unsettled_markets})"
+    )
     lines.append("")
 
-    if not report.providers:
-        lines.append("  No calibration data yet.")
+    if report.total_decisions == 0:
+        lines.append("  No decision data yet.")
         return "\n".join(lines)
 
-    # Per-provider breakdown
-    for ps in report.providers:
-        lines.append(f"{'─' * 72}")
-        lines.append(f"  Provider: {ps.name}")
-        lines.append(f"  Samples: {ps.total_samples} total, {ps.settled_samples} settled")
+    # Action distribution
+    astats = report.action_stats
+    lines.append(f"{'─' * 72}")
+    lines.append("  ACTION DISTRIBUTION")
+    lines.append("")
+    actions_str = ", ".join(
+        f"{k}={v}" for k, v in sorted(astats.action_counts.items())
+    )
+    lines.append(f"  {actions_str}")
+    lines.append("")
 
-        acc = ps.overall_accuracy
-        acc_str = f"{acc*100:.1f}%" if acc is not None else "N/A"
-        lines.append(f"  Overall accuracy (settled, non-hold): {acc_str}")
-        lines.append("")
+    # Accuracy (settled only)
+    acc = astats.overall_accuracy
+    acc_str = f"{acc * 100:.1f}%" if acc is not None else "N/A"
+    lines.append(f"  Overall accuracy (settled, non-hold): {acc_str}")
+    lines.append("")
 
-        actions_str = ", ".join(f"{k}={v}" for k, v in sorted(ps.action_counts.items()))
-        lines.append(f"  Action distribution: {actions_str}")
-        lines.append("")
-
-        # Calibration table
-        lines.append(f"  {'Confidence':>12}  {'Samples':>8}  {'Correct':>8}  {'Accuracy':>10}  {'Avg Conf':>10}")
-        lines.append(f"  {'─'*12}  {'─'*8}  {'─'*8}  {'─'*10}  {'─'*10}")
-        for b in ps.bins:
-            acc_cell = f"{b.accuracy*100:.1f}%" if b.accuracy is not None else "—"
-            conf_cell = f"{b.avg_confidence:.3f}" if b.total > 0 else "—"
-            lines.append(
-                f"  {b.label:>12}  {b.total:>8}  {b.correct:>8}  {acc_cell:>10}  {conf_cell:>10}"
-            )
-        lines.append("")
-
-    # Comparison table (if multiple providers)
-    if len(report.providers) > 1:
-        lines.append(f"{'─' * 72}")
-        lines.append("  MODEL COMPARISON (settled non-hold samples)")
-        lines.append("")
-        header = f"  {'Provider':>20}  {'Samples':>8}  {'Accuracy':>10}  {'Avg Hold%':>10}"
-        lines.append(header)
-        lines.append(f"  {'─'*20}  {'─'*8}  {'─'*10}  {'─'*10}")
-        for ps in report.providers:
-            acc = ps.overall_accuracy
-            acc_str = f"{acc*100:.1f}%" if acc is not None else "—"
-            hold_count = ps.action_counts.get("hold", 0)
-            hold_pct = (hold_count / ps.total_samples * 100) if ps.total_samples > 0 else 0
-            lines.append(
-                f"  {ps.name:>20}  {ps.settled_samples:>8}  {acc_str:>10}  {hold_pct:>9.1f}%"
-            )
-        lines.append("")
+    # Confidence calibration table
+    lines.append(
+        f"  {'Confidence':>12}  {'Samples':>8}  {'Correct':>8}  "
+        f"{'Accuracy':>10}  {'Avg Conf':>10}"
+    )
+    lines.append(
+        f"  {'─' * 12}  {'─' * 8}  {'─' * 8}  {'─' * 10}  {'─' * 10}"
+    )
+    for b in astats.bins:
+        acc_cell = f"{b.accuracy * 100:.1f}%" if b.accuracy is not None else "—"
+        conf_cell = f"{b.avg_confidence:.3f}" if b.total > 0 else "—"
+        lines.append(
+            f"  {b.label:>12}  {b.total:>8}  {b.correct:>8}  "
+            f"{acc_cell:>10}  {conf_cell:>10}"
+        )
+    lines.append("")
 
     # City breakdown
     if report.city_stats:
         lines.append(f"{'─' * 72}")
         lines.append("  ACCURACY BY CITY (settled non-hold samples)")
         lines.append("")
-        lines.append(f"  {'City':>20}  {'Total':>6}  {'Settled':>8}  {'Correct':>8}  {'Accuracy':>10}")
-        lines.append(f"  {'─'*20}  {'─'*6}  {'─'*8}  {'─'*8}  {'─'*10}")
+        lines.append(
+            f"  {'City':>20}  {'Total':>6}  {'Settled':>8}  "
+            f"{'Correct':>8}  {'Accuracy':>10}"
+        )
+        lines.append(
+            f"  {'─' * 20}  {'─' * 6}  {'─' * 8}  {'─' * 8}  {'─' * 10}"
+        )
         for cs in report.city_stats:
-            acc = f"{cs.accuracy*100:.1f}%" if cs.accuracy is not None else "—"
+            acc = (
+                f"{cs.accuracy * 100:.1f}%"
+                if cs.accuracy is not None
+                else "—"
+            )
             lines.append(
                 f"  {cs.city:>20}  {cs.total_samples:>6}  "
                 f"{cs.settled_samples:>8}  {cs.correct:>8}  {acc:>10}"
@@ -90,11 +92,13 @@ def format_report(report: CalibrationReport, date_str: str) -> str:
         lines.append("  METAR CROSS-VALIDATION (Singapore)")
         lines.append("")
         rate = ds.consistency_rate
-        rate_str = f"{rate*100:.1f}%" if rate is not None else "—"
-        lines.append(f"  Total checks: {ds.total_checks}  "
-                     f"Consistent: {ds.consistent}  "
-                     f"Inconsistent: {ds.inconsistent}  "
-                     f"Unknown: {ds.unknown}")
+        rate_str = f"{rate * 100:.1f}%" if rate is not None else "—"
+        lines.append(
+            f"  Total checks: {ds.total_checks}  "
+            f"Consistent: {ds.consistent}  "
+            f"Inconsistent: {ds.inconsistent}  "
+            f"Unknown: {ds.unknown}"
+        )
         lines.append(f"  Consistency rate: {rate_str}")
 
         if ds.details:
@@ -106,7 +110,8 @@ def format_report(report: CalibrationReport, date_str: str) -> str:
                     f"Gamma={d.get('gamma_outcome')}, "
                     f"METAR max={d.get('metar_max_temp_c')}°C "
                     f"(→{d.get('metar_rounded_c')}°C), "
-                    f"threshold={d.get('threshold_temp_c')}°C {d.get('direction', '')}"
+                    f"threshold={d.get('threshold_temp_c')}°C "
+                    f"{d.get('direction', '')}"
                 )
         lines.append("")
 
@@ -115,12 +120,12 @@ def format_report(report: CalibrationReport, date_str: str) -> str:
 
 
 def generate_report(
-    db_path: str = "hermes_calibration.db",
+    db_path: str = "hermes_decisions.db",
     reports_dir: str = "reports",
 ) -> str:
-    db = CalibrationDB(db_path)
+    db = DecisionLog(db_path)
     try:
-        report = analyze_calibration(db)
+        report = analyze_decisions(db)
     finally:
         db.close()
 
@@ -136,8 +141,10 @@ def generate_report(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Generate Hermes daily calibration report")
-    parser.add_argument("--db", default="hermes_calibration.db")
+    parser = argparse.ArgumentParser(
+        description="Generate Hermes daily decision report"
+    )
+    parser.add_argument("--db", default="hermes_decisions.db")
     parser.add_argument("--reports-dir", default="reports")
     args = parser.parse_args()
 

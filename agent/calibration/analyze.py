@@ -1,15 +1,16 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 
-from agent.calibration.db import CalibrationDB
+from agent.memory import DecisionLog
 
 CONFIDENCE_BINS = [
-    (0.0, 0.2, "0.0–0.2"),
-    (0.2, 0.4, "0.2–0.4"),
-    (0.4, 0.6, "0.4–0.6"),
-    (0.6, 0.8, "0.6–0.8"),
-    (0.8, 1.01, "0.8–1.0"),
+    (0.0, 0.2, "0.0-0.2"),
+    (0.2, 0.4, "0.2-0.4"),
+    (0.4, 0.6, "0.4-0.6"),
+    (0.6, 0.8, "0.6-0.8"),
+    (0.8, 1.01, "0.8-1.0"),
 ]
 
 
@@ -26,19 +27,18 @@ class BinStats:
 
 
 @dataclass
-class ProviderStats:
-    name: str
-    total_samples: int = 0
-    settled_samples: int = 0
-    bins: list[BinStats] = field(default_factory=list)
+class ActionStats:
+    total_decisions: int = 0
     action_counts: dict[str, int] = field(default_factory=dict)
+    bins: list[BinStats] = field(default_factory=list)
 
     @property
     def overall_accuracy(self) -> float | None:
-        if self.settled_samples == 0:
+        settled_actionable = sum(b.total for b in self.bins)
+        if settled_actionable == 0:
             return None
         correct = sum(b.correct for b in self.bins)
-        return correct / self.settled_samples
+        return correct / settled_actionable
 
 
 @dataclass
@@ -69,10 +69,11 @@ class DiscrepancyStats:
 
 @dataclass
 class CalibrationReport:
-    providers: list[ProviderStats]
+    total_decisions: int = 0
     total_markets: int = 0
     settled_markets: int = 0
     unsettled_markets: int = 0
+    action_stats: ActionStats = field(default_factory=ActionStats)
     city_stats: list[CityStats] = field(default_factory=list)
     discrepancy_stats: DiscrepancyStats = field(default_factory=DiscrepancyStats)
 
@@ -85,87 +86,94 @@ def _is_prediction_correct(action: str, actual: str) -> bool:
     return False
 
 
-def analyze_calibration(db: CalibrationDB) -> CalibrationReport:
-    provider_names = db.get_provider_names()
-    all_samples = db.get_all_samples()
+def _parse_signal(row: dict) -> dict:
+    """Extract action and confidence from a decision row."""
+    try:
+        sig = json.loads(row["final_signal_json"])
+        return {
+            "action": sig.get("action", "hold"),
+            "confidence": sig.get("confidence", 0.0),
+            "quality": sig.get("quality"),
+        }
+    except (json.JSONDecodeError, TypeError):
+        return {"action": "hold", "confidence": 0.0, "quality": None}
 
-    market_ids = {s["market_id"] for s in all_samples}
-    settled_ids = {s["market_id"] for s in all_samples if s["settled"]}
 
-    provider_stats: list[ProviderStats] = []
+def analyze_decisions(db: DecisionLog) -> CalibrationReport:
+    all_rows = db.get_all_decisions()
 
-    for pname in provider_names:
-        samples = db.get_samples_by_provider(pname)
-        settled = [s for s in samples if s["settled"] and s["actual_outcome"]]
+    market_ids = {r["market_id"] for r in all_rows}
+    settled_ids = {r["market_id"] for r in all_rows if r["settled"]}
 
-        bins: list[BinStats] = []
-        for lo, hi, label in CONFIDENCE_BINS:
-            bin_samples = [
-                s for s in settled
-                if lo <= s["llm_confidence"] < hi and s["llm_action"] != "hold"
-            ]
-            correct = sum(
-                1 for s in bin_samples
-                if _is_prediction_correct(s["llm_action"], s["actual_outcome"])
-            )
-            avg_conf = (
-                sum(s["llm_confidence"] for s in bin_samples) / len(bin_samples)
-                if bin_samples
-                else 0.0
-            )
-            bins.append(BinStats(
-                label=label,
-                total=len(bin_samples),
-                correct=correct,
-                avg_confidence=avg_conf,
-            ))
+    action_counts: dict[str, int] = {}
+    for r in all_rows:
+        sig = _parse_signal(r)
+        action = sig["action"]
+        action_counts[action] = action_counts.get(action, 0) + 1
 
-        action_counts: dict[str, int] = {}
-        for s in samples:
-            action_counts[s["llm_action"]] = action_counts.get(s["llm_action"], 0) + 1
-
-        provider_stats.append(ProviderStats(
-            name=pname,
-            total_samples=len(samples),
-            settled_samples=len(settled),
-            bins=bins,
-            action_counts=action_counts,
+    settled_rows = [r for r in all_rows if r["settled"] and r.get("actual_outcome")]
+    bins: list[BinStats] = []
+    for lo, hi, label in CONFIDENCE_BINS:
+        bin_rows = []
+        for r in settled_rows:
+            sig = _parse_signal(r)
+            if sig["action"] != "hold" and lo <= sig["confidence"] < hi:
+                bin_rows.append((sig, r))
+        correct = sum(
+            1 for sig, r in bin_rows
+            if _is_prediction_correct(sig["action"], r["actual_outcome"])
+        )
+        avg_conf = (
+            sum(sig["confidence"] for sig, _ in bin_rows) / len(bin_rows)
+            if bin_rows else 0.0
+        )
+        bins.append(BinStats(
+            label=label,
+            total=len(bin_rows),
+            correct=correct,
+            avg_confidence=avg_conf,
         ))
 
-    city_stats = _compute_city_stats(all_samples)
+    action_stats = ActionStats(
+        total_decisions=len(all_rows),
+        action_counts=action_counts,
+        bins=bins,
+    )
+
+    city_stats = _compute_city_stats(all_rows)
     discrepancy_stats = _compute_discrepancy_stats(db)
 
     return CalibrationReport(
-        providers=provider_stats,
+        total_decisions=len(all_rows),
         total_markets=len(market_ids),
         settled_markets=len(settled_ids),
         unsettled_markets=len(market_ids - settled_ids),
+        action_stats=action_stats,
         city_stats=city_stats,
         discrepancy_stats=discrepancy_stats,
     )
 
 
-def _compute_city_stats(all_samples: list[dict]) -> list[CityStats]:
-    """Compute per-city accuracy breakdown from settled samples."""
+def _compute_city_stats(all_rows: list[dict]) -> list[CityStats]:
     cities: dict[str, CityStats] = {}
-    for s in all_samples:
-        city = s.get("city", "Unknown")
+    for r in all_rows:
+        city = r.get("city") or "Unknown"
         if city not in cities:
             cities[city] = CityStats(city=city)
         cs = cities[city]
         cs.total_samples += 1
-        if s["settled"] and s.get("actual_outcome"):
+        if r["settled"] and r.get("actual_outcome"):
             cs.settled_samples += 1
-            if s["llm_action"] != "hold" and _is_prediction_correct(
-                s["llm_action"], s["actual_outcome"]
+            sig = _parse_signal(r)
+            if sig["action"] != "hold" and _is_prediction_correct(
+                sig["action"], r["actual_outcome"]
             ):
                 cs.correct += 1
 
     return sorted(cities.values(), key=lambda c: c.settled_samples, reverse=True)
 
 
-def _compute_discrepancy_stats(db: CalibrationDB) -> DiscrepancyStats:
-    """Compute METAR cross-validation statistics from settlement_details table."""
+def _compute_discrepancy_stats(db: DecisionLog) -> DiscrepancyStats:
     details = db.get_settlement_details()
     stats = DiscrepancyStats(total_checks=len(details))
 

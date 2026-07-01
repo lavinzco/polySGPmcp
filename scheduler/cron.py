@@ -14,7 +14,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from agent.calibration.db import CalibrationDB
 from agent.calibration.settlement_tracker import (
     check_settled_markets_singapore,
     SettlementCheckResult,
@@ -162,13 +161,13 @@ async def run_collection_once(
 
 async def run_settlement_check(
     *,
-    cal_db_path: str | None = None,
+    db_path: str | None = None,
 ) -> SettlementCheckResult:
     """Check settled markets and cross-validate outcomes with METAR."""
-    path = cal_db_path or _data_path("hermes_calibration.db")
-    cal_db = CalibrationDB(path)
+    path = db_path or _data_path("hermes_decisions.db")
+    db = DecisionLog(db_path=path)
     try:
-        result = await check_settled_markets_singapore(cal_db)
+        result = await check_settled_markets_singapore(db)
         logger.info(
             f"Settlement check: {len(result.settled)} newly settled, "
             f"{len(result.metar_checks)} METAR-checked, "
@@ -176,7 +175,7 @@ async def run_settlement_check(
         )
         return result
     finally:
-        cal_db.close()
+        db.close()
 
 
 CITY_MODES: dict[str, set[str]] = {

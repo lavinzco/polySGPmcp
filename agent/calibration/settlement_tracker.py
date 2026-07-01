@@ -9,9 +9,11 @@ from dataclasses import dataclass, field
 
 import httpx
 
-from agent.calibration.db import CalibrationDB
 from agent.calibration.verified_stations import get_verified_station, VerifiedStation
+from agent.memory import DecisionLog
 from common.config import settings
+from polymarket.models import Market
+from polymarket.temperature import parse_temperature_market
 
 logger = logging.getLogger("hermes.calibration.settlement")
 
@@ -43,55 +45,17 @@ class SettlementCheckResult:
         return [c for c in self.metar_checks if c.is_consistent is False]
 
 
-async def check_settled_markets(
-    db: CalibrationDB,
-    *,
-    gamma_base_url: str | None = None,
-    client: httpx.AsyncClient | None = None,
-) -> dict[str, str]:
-    """Check unsettled markets against Gamma API, backfill outcomes.
-    Returns dict of {market_id: outcome} for newly settled markets.
-    """
-    base_url = (gamma_base_url or settings.gamma_api_base_url).rstrip("/")
-    unsettled_ids = db.get_unsettled_market_ids()
-    if not unsettled_ids:
-        logger.info("No unsettled markets to check")
-        return {}
-
-    logger.info(f"Checking {len(unsettled_ids)} unsettled markets")
-    settled: dict[str, str] = {}
-
-    own_client = client is None
-    if own_client:
-        client = httpx.AsyncClient(timeout=30, headers={"Accept-Encoding": "gzip, deflate"})
-
-    try:
-        for market_id in unsettled_ids:
-            outcome = await _check_single_market(client, base_url, market_id)
-            if outcome is not None:
-                count = db.settle_market(market_id, outcome)
-                settled[market_id] = outcome
-                logger.info(f"  Settled {market_id} → {outcome} ({count} samples updated)")
-    finally:
-        if own_client:
-            await client.aclose()
-
-    logger.info(f"Settled {len(settled)}/{len(unsettled_ids)} markets")
-    return settled
-
-
 async def check_settled_markets_singapore(
-    db: CalibrationDB,
+    db: DecisionLog,
     *,
     gamma_base_url: str | None = None,
     client: httpx.AsyncClient | None = None,
 ) -> SettlementCheckResult:
     """Enhanced settlement check with METAR cross-validation.
 
-    All unsettled markets are checked against the Gamma API for settlement.
-    METAR cross-validation only runs for cities in the verified_stations
-    whitelist (currently: Singapore/WSSS). Other cities get pure Gamma
-    settlement with no discrepancy detection.
+    Reads unsettled markets from the decisions table and checks them
+    against the Gamma API. METAR cross-validation runs for cities in
+    the verified_stations whitelist.
     """
     base_url = (gamma_base_url or settings.gamma_api_base_url).rstrip("/")
     unsettled_ids = db.get_unsettled_market_ids()
@@ -121,7 +85,7 @@ async def check_settled_markets_singapore(
 
             count = db.settle_market(market_id, outcome)
             result.settled[market_id] = outcome
-            logger.info(f"  Settled {market_id} → {outcome} ({count} samples updated)")
+            logger.info(f"  Settled {market_id} -> {outcome} ({count} rows updated)")
 
             if market_id in verified_samples:
                 info = verified_samples[market_id]
@@ -152,28 +116,59 @@ async def check_settled_markets_singapore(
 
 
 def _get_verified_sample_info(
-    db: CalibrationDB, market_ids: list[str],
+    db: DecisionLog, market_ids: list[str],
 ) -> dict[str, dict]:
-    """Get threshold/date info for markets in METAR-verified cities."""
-    all_samples = db.get_all_samples()
+    """Get threshold/date info for markets in METAR-verified cities.
+
+    Parses the market question from market_snapshot_json to extract
+    city, threshold, direction, and date using the temperature parser.
+    """
+    all_rows = db.get_all_decisions()
+    seen: set[str] = set()
     info: dict[str, dict] = {}
-    for s in all_samples:
-        mid = s["market_id"]
-        if mid not in market_ids:
+
+    for r in all_rows:
+        mid = r["market_id"]
+        if mid not in market_ids or mid in seen:
             continue
-        city = s.get("city", "")
+
+        city = r.get("city", "")
         station = get_verified_station(city)
         if station is None:
+            seen.add(mid)
             continue
+
+        try:
+            market_data = json.loads(r["market_snapshot_json"])
+        except (json.JSONDecodeError, TypeError):
+            seen.add(mid)
+            continue
+
+        market_obj = Market(
+            id=market_data.get("id", mid),
+            question=market_data.get("question", ""),
+            description=market_data.get("description", ""),
+            outcomePrices=json.dumps([
+                str(market_data.get("outcome_yes_price", 0.5)),
+                str(market_data.get("outcome_no_price", 0.5)),
+            ]),
+        )
+        tm = parse_temperature_market(market_obj)
+        if tm is None:
+            seen.add(mid)
+            continue
+
         info[mid] = {
-            "question": s.get("market_id", ""),
-            "date": s.get("date", ""),
-            "threshold_temp": s.get("threshold_temp"),
-            "threshold_unit": s.get("threshold_unit", "C"),
-            "direction": s.get("direction", ""),
+            "question": market_data.get("question", ""),
+            "date": tm.date,
+            "threshold_temp": tm.threshold_temp,
+            "threshold_unit": tm.threshold_unit,
+            "direction": tm.direction,
             "city": city,
             "station": station,
         }
+        seen.add(mid)
+
     return info
 
 
@@ -267,11 +262,7 @@ async def fetch_metar_max_temp(
     *,
     tz: str | None = None,
 ) -> float | None:
-    """Fetch METAR observations from IEM ASOS and return max temperature in °C.
-
-    Uses local timezone to match Wunderground's day boundary definition.
-    If tz is not provided, looks up the verified station's timezone.
-    """
+    """Fetch METAR observations from IEM ASOS and return max temperature in °C."""
     parts = date_iso.split("-")
     if len(parts) != 3:
         return None
@@ -421,14 +412,7 @@ def _derive_expected_outcome(
     threshold_c: int | None,
     direction: str,
 ) -> str | None:
-    """Given METAR max temp and market threshold, what should the outcome be?
-
-    Market types:
-    - "above": "Will temp exceed X°C?" → YES if actual > threshold
-    - "below": "Will temp be X°C or below?" → YES if actual <= threshold
-    - "between": "Will temp be between X-Y°C?" → handled by exact match
-    - "exact" or "at": "Will temp be exactly X°C?" → YES if actual == threshold
-    """
+    """Given METAR max temp and market threshold, what should the outcome be?"""
     if threshold_c is None:
         return None
 

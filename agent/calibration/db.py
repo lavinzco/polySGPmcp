@@ -1,3 +1,10 @@
+"""DEPRECATED: CalibrationDB and calibration_samples table are superseded by
+agent.memory.DecisionLog (decisions table + settlement_details table).
+
+This module is retained only for the standalone calibration collector
+(agent/calibration/collector.py). The production scheduler path uses
+DecisionLog exclusively.
+"""
 from __future__ import annotations
 
 import json
