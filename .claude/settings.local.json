@@ -57,7 +57,21 @@
       "Bash(docker --version)",
       "Bash(docker-compose --version)",
       "Bash(docker compose *)",
-      "Bash(ls \"/c/Program Files/Docker/Docker/Docker Desktop.exe\" 2>/dev/null && echo \"EXISTS\" || echo \"NOT FOUND\")"
+      "Bash(ls \"/c/Program Files/Docker/Docker/Docker Desktop.exe\" 2>/dev/null && echo \"EXISTS\" || echo \"NOT FOUND\")",
+      "Bash(git -C D:/weather/mcp status)",
+      "Bash(cmd //c \"dir D:\\\\\\\\weather\\\\\\\\mcp /AL\")",
+      "Bash(python -c \"import os; print\\(os.path.realpath\\('D:/weather/mcp'\\)\\); print\\(os.path.realpath\\('D:/weather/polySGPmcp'\\)\\)\")",
+      "Read(//d/weather/polySGPmcp/**)",
+      "Read(//d/weather/polySGPmcp/scripts/**)",
+      "Bash(cp D:/weather/mcp/agent/calibration/daily_report.py D:/weather/polySGPmcp/agent/calibration/daily_report.py)",
+      "Bash(cp D:/weather/mcp/.dockerignore D:/weather/polySGPmcp/.dockerignore)",
+      "Bash(cp D:/weather/mcp/Dockerfile D:/weather/polySGPmcp/Dockerfile)",
+      "Bash(cp D:/weather/mcp/scripts/verify_report.py D:/weather/polySGPmcp/scripts/verify_report.py)",
+      "Bash(git -C D:/weather/polySGPmcp log --oneline -5)",
+      "Bash(git -C D:/weather/polySGPmcp diff --stat)",
+      "Bash(git -C D:/weather/polySGPmcp add .dockerignore Dockerfile agent/calibration/daily_report.py scripts/verify_report.py)",
+      "Bash(git -C D:/weather/polySGPmcp commit -m ' *)",
+      "Bash(git -C D:/weather/polySGPmcp push origin main)"
     ]
   }
 }
