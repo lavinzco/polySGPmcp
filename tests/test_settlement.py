@@ -355,6 +355,23 @@ class TestSettlementOnDecisions:
         rows = decision_db.get_all_decisions()
         assert rows[0]["city"] == "Singapore"
 
+    def test_empty_market_id_excluded(self, decision_db):
+        """Old rows with empty market_id (pre-migration) should not appear."""
+        conn = decision_db._get_conn()
+        conn.execute(
+            "INSERT INTO decisions "
+            "(timestamp, eval_date, market_id, weather_snapshot_json, "
+            "market_snapshot_json, llm_raw_outputs_json, raw_samples_json, "
+            "final_signal_json, risk_decision) "
+            "VALUES (?, ?, '', '{}', '{}', '[]', '[]', '{}', 'approved')",
+            ("2026-06-01T00:00:00", "2026-06-01"),
+        )
+        conn.commit()
+        _log_sg_decision(decision_db, market_id="real-mkt")
+
+        unsettled = decision_db.get_unsettled_market_ids()
+        assert unsettled == ["real-mkt"]
+
 
 # --- Analyze using decisions ---
 

@@ -407,6 +407,47 @@ def _parse_market_date(date_text: str) -> str | None:
     return None
 
 
+async def run_check(*, db_path: str | None = None) -> None:
+    """CLI entry point: check and settle markets, print summary."""
+    from pathlib import Path
+    from common.config import settings
+
+    path = db_path or str(Path(settings.data_dir) / "hermes_decisions.db")
+    db = DecisionLog(db_path=path)
+    try:
+        unsettled = db.get_unsettled_market_ids()
+        print(f"DB: {path}")
+        print(f"Unsettled markets: {len(unsettled)}")
+        if unsettled:
+            print(f"  IDs: {', '.join(unsettled[:20])}")
+            if len(unsettled) > 20:
+                print(f"  ... and {len(unsettled) - 20} more")
+        print()
+
+        result = await check_settled_markets_singapore(db)
+
+        print(f"Settled: {len(result.settled)}")
+        for mid, outcome in result.settled.items():
+            print(f"  {mid} -> {outcome}")
+
+        if result.metar_checks:
+            print(f"\nMETAR checks: {len(result.metar_checks)}")
+            for c in result.metar_checks:
+                status = "OK" if c.is_consistent else "DISCREPANCY"
+                print(
+                    f"  {c.market_id}: Gamma={c.gamma_outcome}, "
+                    f"METAR={c.metar_max_temp_c}°C -> {c.metar_rounded_c}°C, "
+                    f"expected={c.expected_outcome} [{status}]"
+                )
+
+        if not result.settled and not result.metar_checks:
+            print("No markets were settled in this run.")
+            if not unsettled:
+                print("(All markets already settled or no decisions recorded)")
+    finally:
+        db.close()
+
+
 def _derive_expected_outcome(
     metar_rounded_c: int,
     threshold_c: int | None,
@@ -428,3 +469,27 @@ def _derive_expected_outcome(
         return "YES" if metar_rounded_c <= threshold_c else "NO"
 
     return None
+
+
+if __name__ == "__main__":
+    import argparse
+    import asyncio
+
+    parser = argparse.ArgumentParser(
+        description="Hermes settlement tracker"
+    )
+    parser.add_argument(
+        "--check", action="store_true",
+        help="Check unsettled markets and settle any that are closed",
+    )
+    parser.add_argument(
+        "--db", default=None,
+        help="DB path (default: $DATA_DIR/hermes_decisions.db)",
+    )
+    args = parser.parse_args()
+
+    if args.check:
+        logging.basicConfig(level=logging.INFO)
+        asyncio.run(run_check(db_path=args.db))
+    else:
+        parser.print_help()

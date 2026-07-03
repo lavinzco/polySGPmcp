@@ -177,7 +177,8 @@ class DecisionLog:
     def get_unsettled_market_ids(self) -> list[str]:
         conn = self._get_conn()
         rows = conn.execute(
-            "SELECT DISTINCT market_id FROM decisions WHERE settled = 0"
+            "SELECT DISTINCT market_id FROM decisions "
+            "WHERE settled = 0 AND market_id != ''"
         ).fetchall()
         return [row["market_id"] for row in rows]
 
