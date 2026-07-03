@@ -1,15 +1,15 @@
 """Verify daily report works with production decisions data.
 
-Usage (local — copy DB from VPS first):
-    scp vps:~/weather-mcp/data/hermes_decisions.db ./data/
+Usage (local):
     python scripts/verify_report.py --db data/hermes_decisions.db
 
-Or inside Docker container:
-    docker compose exec hermes python scripts/verify_report.py
+Inside Docker container:
+    docker compose run --rm hermes python scripts/verify_report.py
 """
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -21,16 +21,28 @@ from agent.memory import DecisionLog
 from datetime import datetime, timezone
 
 
+def _data_path(filename: str) -> str:
+    data_dir = os.environ.get("DATA_DIR", ".")
+    return str(Path(data_dir) / filename)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--db", default="data/hermes_decisions.db")
+    parser.add_argument(
+        "--db", default=None,
+        help="Path to decisions DB (default: $DATA_DIR/hermes_decisions.db)",
+    )
     args = parser.parse_args()
 
-    db_path = Path(args.db)
+    db_path = Path(args.db) if args.db else Path(_data_path("hermes_decisions.db"))
+    print(f"DB path: {db_path}")
+    print(f"DATA_DIR={os.environ.get('DATA_DIR', '(not set)')}")
+
     if not db_path.exists():
         print(f"ERROR: {db_path} not found")
-        print("Copy from VPS: scp vps:~/weather-mcp/data/hermes_decisions.db ./data/")
         sys.exit(1)
+
+    print(f"DB size: {db_path.stat().st_size / 1024 / 1024:.1f} MB")
 
     db = DecisionLog(db_path)
     try:

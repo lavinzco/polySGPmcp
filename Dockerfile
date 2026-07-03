@@ -10,6 +10,7 @@ COPY common/ common/
 COPY polymarket/ polymarket/
 COPY weather_mcp/ weather_mcp/
 COPY scheduler/ scheduler/
+COPY scripts/ scripts/
 
 RUN pip install --no-cache-dir -e .
 

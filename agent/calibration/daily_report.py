@@ -119,11 +119,17 @@ def format_report(report: CalibrationReport, date_str: str) -> str:
     return "\n".join(lines)
 
 
+def _data_path(filename: str) -> str:
+    from common.config import settings
+    return str(Path(settings.data_dir) / filename)
+
+
 def generate_report(
-    db_path: str = "hermes_decisions.db",
-    reports_dir: str = "reports",
+    db_path: str | None = None,
+    reports_dir: str | None = None,
 ) -> str:
-    db = DecisionLog(db_path)
+    path = db_path or _data_path("hermes_decisions.db")
+    db = DecisionLog(path)
     try:
         report = analyze_decisions(db)
     finally:
@@ -132,9 +138,9 @@ def generate_report(
     date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     text = format_report(report, date_str)
 
-    out_dir = Path(reports_dir)
+    out_dir = Path(reports_dir or _data_path("reports"))
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_file = out_dir / f"calibration_{date_str}.txt"
+    out_file = out_dir / f"report_{date_str}.txt"
     out_file.write_text(text, encoding="utf-8")
 
     return text
@@ -144,8 +150,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Generate Hermes daily decision report"
     )
-    parser.add_argument("--db", default="hermes_decisions.db")
-    parser.add_argument("--reports-dir", default="reports")
+    parser.add_argument("--db", default=None, help="DB path (default: $DATA_DIR/hermes_decisions.db)")
+    parser.add_argument("--reports-dir", default=None, help="Reports dir (default: $DATA_DIR/reports)")
     args = parser.parse_args()
 
     text = generate_report(db_path=args.db, reports_dir=args.reports_dir)
