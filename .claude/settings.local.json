@@ -71,7 +71,13 @@
       "Bash(git -C D:/weather/polySGPmcp diff --stat)",
       "Bash(git -C D:/weather/polySGPmcp add .dockerignore Dockerfile agent/calibration/daily_report.py scripts/verify_report.py)",
       "Bash(git -C D:/weather/polySGPmcp commit -m ' *)",
-      "Bash(git -C D:/weather/polySGPmcp push origin main)"
+      "Bash(git -C D:/weather/polySGPmcp push origin main)",
+      "Bash(python -m pytest tests/ -x -q)",
+      "Bash(python -m pytest tests/test_settlement.py -x -q)",
+      "Bash(python -m agent.calibration.settlement_tracker)",
+      "Bash(cp D:/weather/mcp/agent/calibration/settlement_tracker.py D:/weather/polySGPmcp/agent/calibration/settlement_tracker.py)",
+      "Bash(cp D:/weather/mcp/agent/memory.py D:/weather/polySGPmcp/agent/memory.py)",
+      "Bash(cp D:/weather/mcp/tests/test_settlement.py D:/weather/polySGPmcp/tests/test_settlement.py)"
     ]
   }
 }
